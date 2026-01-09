@@ -1,74 +1,104 @@
-"use client";
+'use client';
 
-import { useState, useEffect, use } from "react";
-import { Transaction, TransactionFormData } from "@/types";
-import ExpenseForm from "./ExpenseForm";
-import ExpenseList from "./ExpenseList";
-import Summary from "./Summary";
+import { useState, useEffect } from 'react';
+import ExpenseForm from './ExpenseForm';
+import ExpenseList from './ExpenseList';
+import Summary from './Summary';
+import { Transaction, TransactionFormData } from '@/types';
+
+// 1. Import đồ nghề Firebase
+import { db, auth } from '@/lib/firebase';
+import { 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query, 
+  orderBy,
+  serverTimestamp 
+} from 'firebase/firestore';
+import { onAuthStateChanged, User } from 'firebase/auth';
 
 export default function ExpenseContainer() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  // 1. Thêm state lưu tỷ giá
-  const [rate, setRate] = useState<number>(0);
+  const [user, setUser] = useState<User | null>(null); // Lưu thông tin người đang đăng nhập
 
-  // 2. Viết hàm fetch API (chạy 1 lần khi mở web)
+  // 2. Lắng nghe: Ai đang đăng nhập?
   useEffect(() => {
-    const fetchRate = async () => {
-      try {
-        const res = await fetch("https://open.er-api.com/v6/latest/USD");
-        const data = await res.json();
-        // API này trả về rates.VND, lấy nó lưu vào state
-        setRate(data.rates.VND);
-      } catch (error) {
-        console.error("Lỗi lấy tỷ giá:", error);
-      }
-    };
-
-    fetchRate();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) setTransactions([]); // Nếu thoát thì xóa sạch list trên màn hình
+    });
+    return () => unsubscribe();
   }, []);
 
+  // 3. Lắng nghe Dữ liệu Real-time (Thay thế cho useEffect đọc LocalStorage)
   useEffect(() => {
-    const storedTransactions = localStorage.getItem("transactions");
-    if (storedTransactions) {
-      setTransactions(JSON.parse(storedTransactions));
+    if (!user) return; // Chưa đăng nhập thì không tải dữ liệu
+
+    // Đường dẫn: users -> [ID Của User] -> transactions
+    const q = query(
+      collection(db, 'users', user.uid, 'transactions'),
+      orderBy('createdAt', 'desc') // Sắp xếp cái mới nhất lên đầu
+    );
+
+    // onSnapshot: Tự động chạy mỗi khi Database thay đổi (Thêm/Xóa/Sửa bên kia là bên này nhảy số luôn)
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id, // Lấy ID do Firebase tự sinh
+        ...doc.data()
+      })) as Transaction[];
+      
+      setTransactions(data);
+    });
+
+    return () => unsubscribe(); // Dọn dẹp khi tắt component
+  }, [user]); // Chạy lại khi user thay đổi
+
+  // 4. Hàm Thêm mới (Gửi lên Mây)
+  const handleAdd = async (formData: TransactionFormData) => {
+    if (!user) {
+      alert("Vui lòng đăng nhập để lưu!");
+      return;
     }
-    setIsLoading(true);
-  }, []);
 
-  useEffect(() => {
-    if (isLoading)
-      localStorage.setItem("transactions", JSON.stringify(transactions));
-  }, [transactions, isLoading]);
-
-  const handleDelete = (id: string) => {
-    const updateTransactions = transactions.filter((item) => item.id !== id);
-    setTransactions(updateTransactions);
+    try {
+      await addDoc(collection(db, 'users', user.uid, 'transactions'), {
+        ...formData,
+        createdAt: serverTimestamp() // Lưu thêm thời gian server để sắp xếp
+      });
+      // Không cần setTransactions thủ công nữa! onSnapshot sẽ tự lo việc đó.
+    } catch (error) {
+      console.error("Lỗi thêm:", error);
+    }
   };
 
-  const handleAdd = (formData: TransactionFormData) => {
-    const newTransaction = {
-      id: crypto.randomUUID(),
-      ...formData,
-    };
-    setTransactions([newTransaction, ...transactions]);
+  // 5. Hàm Xóa (Bắn lệnh lên Mây)
+  const handleDelete = async (id: string) => {
+    if (!user) return;
+    try {
+      const docRef = doc(db, 'users', user.uid, 'transactions', id);
+      await deleteDoc(docRef);
+    } catch (error) {
+      console.error("Lỗi xóa:", error);
+    }
   };
 
   return (
-    <div className="max-w-4xl mx-auto p-4">
-      <h2 className="text-2xl font-bold mb-4">Quản Lý Chi Tiêu</h2>
-      <div className="text-sm text-gray-500 mb-4 italic">
-        🇺🇸 1 USD = {rate ? rate.toLocaleString() : "..."} VND
-      </div>
-
-      <Summary transactions={transactions}></Summary>
-
-      <ExpenseForm onAdd={handleAdd} />
-
-      <div className="bg-gray-100 p-4 rounded">
-        <h3 className="font-bold">Danh sách giao dịch (Test):</h3>
-        <ExpenseList data={transactions} onDelete={handleDelete} />
-      </div>
+    <div className="max-w-4xl mx-auto">
+      {/* Nếu chưa đăng nhập thì hiện thông báo nhắc nhở */}
+      {!user ? (
+        <div className="text-center p-10 bg-yellow-100 rounded text-yellow-800">
+          Vui lòng đăng nhập để quản lý chi tiêu của bạn 🔒
+        </div>
+      ) : (
+        <>
+          <Summary transactions={transactions} />
+          <ExpenseForm onAdd={handleAdd} />
+          <ExpenseList data={transactions} onDelete={handleDelete} />
+        </>
+      )}
     </div>
   );
 }
